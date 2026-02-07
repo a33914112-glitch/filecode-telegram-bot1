@@ -12,7 +12,8 @@ import calendar
 import base64
 import json  # <-- 添加这行
 # ==================== 【新增】E盘日志系统 ====================
-from datetime import datetime, timedelta
+import os
+from datetime import datetime
 
 class E盘日志:
     """专门保存到E盘的日志系统"""
@@ -66,6 +67,7 @@ class E盘日志:
 
 # 创建日志对象
 e盘日志器 = E盘日志()
+from datetime import datetime, timedelta
 from collections import defaultdict
 # ==================== 【新增】统一客服配置 ====================
 SUPPORT_BOT_USERNAME = "SUPPORT_BOT_LINK"  # 你的客服机器人用户名
@@ -84,6 +86,7 @@ except ImportError:
     print("⚠️  psutil 模块未安装，系统监控功能将受限")
     print("💡 安装命令: pip install psutil")
 # ==================== 【新增】代理服务器配置部分 ====================
+import telebot
 import requests
 import ssl
 import urllib3
@@ -285,6 +288,8 @@ class VIPPackageConfig:
         
         return result
 
+
+    
     # 默认套餐（后台可修改）
     DEFAULT_PACKAGES = {
         "monthly": {
@@ -1390,6 +1395,7 @@ class DecodeCountCache:
 # 创建缓存实例
 decode_cache = DecodeCountCache(flush_interval=30)
 
+
 # 创建实例
 pack_remark_manager = PackRemarkManager()
 
@@ -1445,6 +1451,8 @@ class VIPPaymentSystem:
             daily_price = price / (months * 30)
             text += f"日均约{daily_price:.2f}元\n\n"
 
+
+        
         markup = telebot.types.InlineKeyboardMarkup(row_width=1)
     
         for pkg in packages:
@@ -4730,6 +4738,7 @@ def handle_userinfo_command(message):
     
     bot.reply_to(message, text, parse_mode='Markdown')
 
+
 @bot.message_handler(commands=['searchuser'])
 def handle_searchuser_command(message):
     """搜索用户"""
@@ -4812,6 +4821,7 @@ def handle_searchuser_command(message):
         text += "💡 使用 /userinfo <用户ID> 查看详细信息"
     
     bot.reply_to(message, text, parse_mode='Markdown')
+
 
 @bot.message_handler(commands=['userorders'])
 def handle_userorders_command(message):
@@ -4926,6 +4936,7 @@ def handle_userorders_command(message):
     
     bot.reply_to(message, text, parse_mode='Markdown')
 
+
 @bot.message_handler(commands=['setvip'])
 def handle_setvip_command(message):
     """设置用户VIP"""
@@ -4977,6 +4988,7 @@ def handle_setvip_command(message):
         text = f"❌ VIP设置失败: {e}"
     
     bot.reply_to(message, text, parse_mode='Markdown')
+
 
 @bot.message_handler(commands=['removevip'])
 def handle_removevip_command(message):
@@ -5333,6 +5345,7 @@ def handle_admin_monitor_callback(call):
         return
     
     # 获取系统信息
+    import psutil
     import platform
     
     try:
@@ -5386,6 +5399,7 @@ def handle_admin_monitor_callback(call):
         batch_sessions = len(smart_batch_sender.user_sessions) if hasattr(smart_batch_sender, 'user_sessions') else 0
         
         # 线程信息
+        import threading
         active_threads = threading.active_count()
         
         # 构建监控信息
@@ -5626,6 +5640,7 @@ def handle_admin_users_callback(call):
     
     bot.answer_callback_query(call.id)
 
+
 # ==================== 【修改点1：VIP用户列表添加移除按钮】====================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_vip_list")
 def handle_admin_vip_list(call):
@@ -5731,6 +5746,7 @@ def handle_admin_vip_list(call):
     
     bot.answer_callback_query(call.id)
 
+
 @bot.callback_query_handler(func=lambda call: call.data == "admin_normal_list")
 def handle_admin_normal_list(call):
     """显示普通用户列表"""
@@ -5822,6 +5838,7 @@ def handle_admin_normal_list(call):
     
     bot.answer_callback_query(call.id)
 
+
 @bot.callback_query_handler(func=lambda call: call.data == "admin_active_users")
 def handle_admin_active_users(call):
     """显示活跃用户榜"""
@@ -5907,6 +5924,7 @@ def handle_admin_active_users(call):
         )
     
     bot.answer_callback_query(call.id)
+
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_file_ranking")
 def handle_admin_file_ranking(call):
@@ -6120,6 +6138,8 @@ def handle_callback(call):
         ask_for_new_payment_order(user_id, chat_id, method_id, message_id)
         bot.answer_callback_query(call.id)
         return    
+
+
 
     elif call.data.startswith("admin_"):
         handle_admin_callback(call)
@@ -6464,6 +6484,11 @@ def send_broadcast_to_all_users(content, admin_id):
         pass
     
     return success_count, fail_count        
+    bot.send_message(
+            chat_id,
+            "🏠 返回主菜单",
+            reply_markup=create_main_menu()
+        )
 
 # ==================== 【新增】备注相关回调处理 ====================
 def handle_code_detail(call):
@@ -7202,6 +7227,7 @@ A: 📞 联系客服：@kfjdfkjdd_bot
             
     except Exception as e:
         print(f"❌ VIP回调处理错误: {e}")
+        import traceback
         traceback.print_exc()
         
         bot.answer_callback_query(
@@ -7885,6 +7911,7 @@ def handle_admin_activate_callback(call):
             
         except Exception as activate_error:
             print(f"❌ [回调处理] VIP激活失败: {activate_error}")
+            import traceback
             traceback.print_exc()
             bot.answer_callback_query(call.id, f"❌ VIP激活失败: {activate_error}", show_alert=True)
             
@@ -7893,6 +7920,7 @@ def handle_admin_activate_callback(call):
         bot.answer_callback_query(call.id, f"❌ 数据格式错误: {e}", show_alert=True)
     except Exception as e:
         print(f"❌ [回调处理] 激活失败: {e}")
+        import traceback
         traceback.print_exc()
         bot.answer_callback_query(call.id, f"❌ 激活失败: {e}", show_alert=True)
 
@@ -8079,6 +8107,7 @@ def main():
             db_pool.close_all()
     except Exception as e:
         print(f"❌ 运行错误: {e}")
+        import traceback
         traceback.print_exc()
         print("🔄 5秒后重启...")
         time.sleep(5)
