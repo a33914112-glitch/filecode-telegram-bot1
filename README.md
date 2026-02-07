@@ -12,8 +12,7 @@ import calendar
 import base64
 import json  # <-- 添加这行
 # ==================== 【新增】E盘日志系统 ====================
-import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 class E盘日志:
     """专门保存到E盘的日志系统"""
@@ -67,7 +66,6 @@ class E盘日志:
 
 # 创建日志对象
 e盘日志器 = E盘日志()
-from datetime import datetime, timedelta
 from collections import defaultdict
 # ==================== 【新增】统一客服配置 ====================
 SUPPORT_BOT_USERNAME = "SUPPORT_BOT_LINK"  # 你的客服机器人用户名
@@ -86,7 +84,6 @@ except ImportError:
     print("⚠️  psutil 模块未安装，系统监控功能将受限")
     print("💡 安装命令: pip install psutil")
 # ==================== 【新增】代理服务器配置部分 ====================
-import telebot
 import requests
 import ssl
 import urllib3
@@ -288,8 +285,6 @@ class VIPPackageConfig:
         
         return result
 
-
-    
     # 默认套餐（后台可修改）
     DEFAULT_PACKAGES = {
         "monthly": {
@@ -556,21 +551,35 @@ class PaymentMethodManager:
 payment_method_manager = PaymentMethodManager()
 # ==================== 数据库连接池 ====================
 class SimpleConnectionPool:
-    """简单的数据库连接池"""
-    
-    def __init__(self, db_path, pool_size=30):
+    def __init__(self, db_path, pool_size=300):  # 🟢 修改1：增加到300
         self.db_path = db_path
         self.pool_size = pool_size
         self.connections = []
         self.lock = threading.Lock()
         self.current = 0
         
+        print(f"💾 创建数据库连接池 ({pool_size}个连接)")
+        print(f"⚡ SQLite优化参数:")
+        print(f"   - WAL模式: 已启用")
+        print(f"   - 缓存大小: 256MB")
+        print(f"   - 内存映射: 1GB")
+        print(f"   - 页大小: 16KB")
+        
         for _ in range(pool_size):
             conn = sqlite3.connect(db_path, check_same_thread=False)
+            # 🟢 修改2：优化SQLite性能参数
             conn.execute('PRAGMA journal_mode=WAL')
-            conn.execute('PRAGMA synchronous=NORMAL')
-            conn.execute('PRAGMA cache_size=-2000')
-            conn.execute('PRAGMA busy_timeout=5000')
+            conn.execute('PRAGMA synchronous=NORMAL')  # 安全和性能的平衡
+            conn.execute('PRAGMA cache_size=-262144')   # 256MB缓存（原2MB）
+            conn.execute('PRAGMA mmap_size=1073741824') # 1GB内存映射
+            conn.execute('PRAGMA page_size=16384')      # 16KB页大小（原默认4KB）
+            conn.execute('PRAGMA temp_store=MEMORY')    # 临时表存内存
+            conn.execute('PRAGMA busy_timeout=30000')   # 30秒超时（原5秒）
+            conn.execute('PRAGMA wal_autocheckpoint=100') # WAL自动检查点
+            conn.execute('PRAGMA foreign_keys=ON')       # 外键约束
+            
+            # 立即应用设置
+            conn.commit()
             self.connections.append(conn)
         
         print(f"✅ 数据库连接池已创建 ({pool_size}个连接)")
@@ -739,6 +748,18 @@ def init_database():
     # 创建索引
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON packs(user_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_code ON packs(code)')
+    # 🟢 新增优化索引
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_packs_decode ON packs(decode_count)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_packs_created ON packs(created_at)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_packs_user_date ON packs(user_id, created_at)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_files_pack ON files(pack_id, file_type)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_user_date ON daily_stats(user_id, date DESC)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_payment_user ON payment_orders(user_id, created_at DESC)')
+    
+    # 分析表以优化查询计划
+    cursor.execute('ANALYZE')
+    
+    print("✅ 数据库索引优化完成")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_pack_id ON files(pack_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_user ON daily_stats(user_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_stats(date)')
@@ -1204,7 +1225,6 @@ class PackDecodeManager:
         finally:
             if cursor:
                 cursor.close()
-    
     def get_decode_count(self, code):
         """获取文件码的解码次数"""
         conn = None
@@ -1223,6 +1243,14 @@ class PackDecodeManager:
         finally:
             if cursor:
                 cursor.close()
+    def increment_decode_count_with_cache(self, code):
+        """【新增】使用缓存的解码次数增加方法"""
+        # 🟢 使用内存缓存，不直接写数据库
+        decode_cache.increment(code)
+        return True
+    def get_decode_count_with_cache(self, code):
+        """【新增】使用缓存的解码次数获取方法"""
+        return decode_cache.get_count(code)
     
     def get_user_packs_with_stats(self, user_id):
         """获取用户的所有文件包（包含解码次数）"""
@@ -1264,6 +1292,104 @@ class PackDecodeManager:
 
 # 创建解码管理器实例
 pack_decode_manager = PackDecodeManager()
+# ==================== 【新增】解码次数内存缓存 ====================
+class DecodeCountCache:
+    """解码次数内存缓存，大幅减少数据库写操作"""
+    
+    def __init__(self, flush_interval=30):
+        self.cache = {}
+        self.lock = threading.Lock()
+        self.flush_interval = flush_interval
+        self.last_flush = time.time()
+        self.total_cached = 0
+        
+        # 启动后台刷新线程
+        threading.Thread(target=self._flush_worker, daemon=True).start()
+        print(f"🔄 解码次数缓存已启动（刷新间隔：{flush_interval}秒）")
+    
+    def increment(self, code):
+        """增加解码次数（内存操作，极快）"""
+        with self.lock:
+            self.cache[code] = self.cache.get(code, 0) + 1
+            self.total_cached += 1
+            
+            # 如果缓存太大，立即刷新
+            if len(self.cache) > 1000:
+                self.flush()
+    
+    def get_count(self, code):
+        """获取解码次数（先查缓存，再查数据库）"""
+        # 先从缓存获取
+        cache_count = 0
+        with self.lock:
+            cache_count = self.cache.get(code, 0)
+        
+        # 再从数据库获取
+        db_count = pack_decode_manager.get_decode_count(code)  # 改为这个方法
+        return db_count + cache_count
+    
+    def flush(self):
+        """立即刷新到数据库"""
+        with self.lock:
+            if not self.cache:
+                return 0
+            
+            conn = None
+            cursor = None
+            try:
+                conn = db_pool.get_connection()
+                cursor = conn.cursor()
+                
+                updated = 0
+                total_increments = 0
+                
+                # 🟢 使用事务批量更新
+                cursor.execute('BEGIN TRANSACTION')
+                for code, count in self.cache.items():
+                    cursor.execute('''
+                    UPDATE packs 
+                    SET decode_count = decode_count + ?
+                    WHERE code = ?
+                    ''', (count, code))
+                    updated += 1
+                    total_increments += count
+                
+                cursor.execute('COMMIT')
+                conn.commit()
+                
+                if updated > 0:
+                    print(f"💾 缓存刷新：{updated}个文件码，{total_increments}次解码")
+                
+                self.cache.clear()
+                self.last_flush = time.time()
+                return updated
+                
+            except Exception as e:
+                print(f"❌ 缓存刷新失败: {e}")
+                if conn:
+                    try:
+                        cursor.execute('ROLLBACK')
+                        conn.rollback()
+                    except:
+                        pass
+                return 0
+            finally:
+                if cursor:
+                    cursor.close()
+    
+    def _flush_worker(self):
+        """后台刷新线程"""
+        while True:
+            time.sleep(self.flush_interval)
+            try:
+                if self.cache:
+                    self.flush()
+            except Exception as e:
+                print(f"❌ 缓存刷新线程错误: {e}")
+
+# 创建缓存实例
+decode_cache = DecodeCountCache(flush_interval=30)
+
 # 创建实例
 pack_remark_manager = PackRemarkManager()
 
@@ -1319,8 +1445,6 @@ class VIPPaymentSystem:
             daily_price = price / (months * 30)
             text += f"日均约{daily_price:.2f}元\n\n"
 
-
-        
         markup = telebot.types.InlineKeyboardMarkup(row_width=1)
     
         for pkg in packages:
@@ -2439,7 +2563,7 @@ def process_merged_batch(user_id, chat_id, code_list, reply_to_message_id=None):
     user_limit_manager.increment_decode_count(user_id)
     # 【新增】增加每个文件码的解码次数
     for code_info in valid_codes:
-        pack_decode_manager.increment_decode_count(code_info['code'])
+        pack_decode_manager.increment_decode_count_with_cache(code_info['code'])
     # 4. 创建批量发送会话
     session_id, code_details = smart_batch_sender.create_merged_session(user_id, chat_id, valid_codes)
     
@@ -3333,7 +3457,7 @@ def process_file_code_silent(user_id, chat_id, code, original_message_id=None):
         )
         return
     # 【新增】增加文件码的解码次数
-    pack_decode_manager.increment_decode_count(code)
+    pack_decode_manager.increment_decode_count_with_cache(code)
     # 更新解码计数
     user_limit_manager.increment_decode_count(user_id)
     
@@ -3665,7 +3789,7 @@ def show_user_codes_page(user_id, chat_id, page_num=1):
             page_text += f"├─ 📝 备注：{remark_preview}\n"
         
         # 【新增】显示解码次数
-        decode_count = pack.get('decode_count', 0)
+        decode_count = pack_decode_manager.get_decode_count_with_cache(pack['code'])
         # 选择图标
         if decode_count == 0:
             decode_icon = "📭"
@@ -4606,7 +4730,6 @@ def handle_userinfo_command(message):
     
     bot.reply_to(message, text, parse_mode='Markdown')
 
-
 @bot.message_handler(commands=['searchuser'])
 def handle_searchuser_command(message):
     """搜索用户"""
@@ -4689,7 +4812,6 @@ def handle_searchuser_command(message):
         text += "💡 使用 /userinfo <用户ID> 查看详细信息"
     
     bot.reply_to(message, text, parse_mode='Markdown')
-
 
 @bot.message_handler(commands=['userorders'])
 def handle_userorders_command(message):
@@ -4804,7 +4926,6 @@ def handle_userorders_command(message):
     
     bot.reply_to(message, text, parse_mode='Markdown')
 
-
 @bot.message_handler(commands=['setvip'])
 def handle_setvip_command(message):
     """设置用户VIP"""
@@ -4856,7 +4977,6 @@ def handle_setvip_command(message):
         text = f"❌ VIP设置失败: {e}"
     
     bot.reply_to(message, text, parse_mode='Markdown')
-
 
 @bot.message_handler(commands=['removevip'])
 def handle_removevip_command(message):
@@ -4936,6 +5056,20 @@ def handle_removevip_command(message):
             conn.rollback()
     
     bot.reply_to(message, text, parse_mode='Markdown')
+@bot.message_handler(commands=['flushcache'])
+def handle_flushcache_command(message):
+    """手动刷新缓存到数据库"""
+    user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        bot.reply_to(message, "❌ 权限不足")
+        return
+    
+    if hasattr(decode_cache, 'flush'):
+        count = decode_cache.flush()
+        bot.reply_to(message, f"✅ 缓存已刷新到数据库\n刷新了 {count} 个文件码的解码次数")
+    else:
+        bot.reply_to(message, "❌ 缓存系统未启用")    
 @bot.message_handler(commands=['packages'])
 def handle_packages_command(message):
     """管理VIP套餐"""
@@ -5199,7 +5333,6 @@ def handle_admin_monitor_callback(call):
         return
     
     # 获取系统信息
-    import psutil
     import platform
     
     try:
@@ -5253,7 +5386,6 @@ def handle_admin_monitor_callback(call):
         batch_sessions = len(smart_batch_sender.user_sessions) if hasattr(smart_batch_sender, 'user_sessions') else 0
         
         # 线程信息
-        import threading
         active_threads = threading.active_count()
         
         # 构建监控信息
@@ -5494,7 +5626,6 @@ def handle_admin_users_callback(call):
     
     bot.answer_callback_query(call.id)
 
-
 # ==================== 【修改点1：VIP用户列表添加移除按钮】====================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_vip_list")
 def handle_admin_vip_list(call):
@@ -5600,7 +5731,6 @@ def handle_admin_vip_list(call):
     
     bot.answer_callback_query(call.id)
 
-
 @bot.callback_query_handler(func=lambda call: call.data == "admin_normal_list")
 def handle_admin_normal_list(call):
     """显示普通用户列表"""
@@ -5692,7 +5822,6 @@ def handle_admin_normal_list(call):
     
     bot.answer_callback_query(call.id)
 
-
 @bot.callback_query_handler(func=lambda call: call.data == "admin_active_users")
 def handle_admin_active_users(call):
     """显示活跃用户榜"""
@@ -5778,7 +5907,6 @@ def handle_admin_active_users(call):
         )
     
     bot.answer_callback_query(call.id)
-
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_file_ranking")
 def handle_admin_file_ranking(call):
@@ -5992,8 +6120,6 @@ def handle_callback(call):
         ask_for_new_payment_order(user_id, chat_id, method_id, message_id)
         bot.answer_callback_query(call.id)
         return    
-
-
 
     elif call.data.startswith("admin_"):
         handle_admin_callback(call)
@@ -6338,11 +6464,6 @@ def send_broadcast_to_all_users(content, admin_id):
         pass
     
     return success_count, fail_count        
-    bot.send_message(
-            chat_id,
-            "🏠 返回主菜单",
-            reply_markup=create_main_menu()
-        )
 
 # ==================== 【新增】备注相关回调处理 ====================
 def handle_code_detail(call):
@@ -6361,7 +6482,7 @@ def handle_code_detail(call):
     remark_info = pack_remark_manager.get_remark(user_id, code)
     
     # 【新增】获取解码次数
-    decode_count = pack_decode_manager.get_decode_count(code)
+    decode_count = pack_decode_manager.get_decode_count_with_cache(code)
     # 选择图标
     if decode_count == 0:
         decode_icon = "📭"
@@ -7081,7 +7202,6 @@ A: 📞 联系客服：@kfjdfkjdd_bot
             
     except Exception as e:
         print(f"❌ VIP回调处理错误: {e}")
-        import traceback
         traceback.print_exc()
         
         bot.answer_callback_query(
@@ -7765,7 +7885,6 @@ def handle_admin_activate_callback(call):
             
         except Exception as activate_error:
             print(f"❌ [回调处理] VIP激活失败: {activate_error}")
-            import traceback
             traceback.print_exc()
             bot.answer_callback_query(call.id, f"❌ VIP激活失败: {activate_error}", show_alert=True)
             
@@ -7774,7 +7893,6 @@ def handle_admin_activate_callback(call):
         bot.answer_callback_query(call.id, f"❌ 数据格式错误: {e}", show_alert=True)
     except Exception as e:
         print(f"❌ [回调处理] 激活失败: {e}")
-        import traceback
         traceback.print_exc()
         bot.answer_callback_query(call.id, f"❌ 激活失败: {e}", show_alert=True)
 
@@ -7871,13 +7989,45 @@ def daily_reset_task():
 # 启动每日重置任务
 reset_thread = threading.Thread(target=daily_reset_task, daemon=True)
 reset_thread.start()
+# ==================== 【新增】定期统计显示 ====================
+def show_cache_stats():
+    """显示缓存统计信息"""
+    if hasattr(decode_cache, 'cache'):
+        cache_size = len(decode_cache.cache)
+        total_cached = decode_cache.total_cached
+        print(f"📊 缓存统计: {cache_size}个文件码待刷新，累计{total_cached}次解码")
+    return True
 
+# 启动定期统计线程
+def start_stats_thread():
+    """启动统计显示线程"""
+    def stats_worker():
+        while True:
+            time.sleep(60)  # 每分钟显示一次
+            try:
+                show_cache_stats()
+            except Exception as e:
+                print(f"统计显示错误: {e}")
+    
+    thread = threading.Thread(target=stats_worker, daemon=True)
+    thread.start()
+    print("📈 缓存统计线程已启动")
+
+# 启动统计线程
+start_stats_thread()
 # ==================== 主程序 ====================
 def main():
     try:
+        print("=" * 60)
+        print("🤖 文件码机器人 - 性能优化版")
+        print("=" * 60)
         print("✅ 系统初始化完成")
         print(f"👷 工作线程: {task_processor.max_workers} 个")
-        print(f"⚡ 最大并发: 1200+ 用户")
+        print(f"💾 数据库连接池: {db_pool.pool_size} 个连接")
+        print(f"⚡ SQLite缓存: 256MB 内存 + 1GB 内存映射")
+        print(f"🔄 解码缓存: 内存缓存 + 30秒自动刷新")
+        print(f"📊 最大并发: 300+ 用户（优化后）")
+        print("=" * 60)
         print(f"📦 文件分页发送: 已启用")
         print(f"🔍 智能文件码识别: 已启用")
         print(f"📝 文件备注功能: 已启用")
@@ -7929,7 +8079,6 @@ def main():
             db_pool.close_all()
     except Exception as e:
         print(f"❌ 运行错误: {e}")
-        import traceback
         traceback.print_exc()
         print("🔄 5秒后重启...")
         time.sleep(5)
